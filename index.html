@@ -74,7 +74,7 @@
 </style></head>
 <body>
 <div id="storageAlert" class="alert" role="alert" hidden></div>
-<header><button class="brand" data-page="home" aria-label="ホームへ"><span class="brand-mark" aria-hidden="true">↻</span><span>リトライノート<small>EIKEN VOCABULARY</small></span></button><div class="header-actions"><nav aria-label="メインメニュー"><button data-page="home">学習</button><button data-page="review">復習</button><button data-page="history">記録</button><button data-page="awards">実績</button></nav><div class="auth-box"><button id="firebaseLogin" class="auth-btn" type="button"><span id="cloudDot" class="cloud-dot"></span><span id="authLabel">Googleログイン</span></button><span id="cloudNote" class="cloud-note">端末保存</span><button id="firebaseLogout" class="signout-btn" type="button" hidden>ログアウト</button></div></div></header>
+<header><button class="brand" data-page="home" aria-label="ホームへ"><span class="brand-mark" aria-hidden="true">↻</span><span>リトライノート<small>EIKEN VOCABULARY</small></span></button><div class="header-actions"><nav aria-label="メインメニュー"><button data-page="home">学習</button><button data-page="review">復習</button><button data-page="history">記録</button><button data-page="awards">実績</button></nav><div class="auth-box"><button id="firebaseLogin" class="auth-btn" type="button" disabled><span id="cloudDot" class="cloud-dot busy"></span><span id="authLabel">認証準備中…</span></button><span id="cloudNote" class="cloud-note">Firebase接続中</span><button id="firebaseLogout" class="signout-btn" type="button" hidden>ログアウト</button></div></div></header>
 <main id="app"><section class="panel"><h2>学習画面を読み込んでいます</h2><p>この表示のままの場合は、公開したサイトのURLをSafariやChromeで開いてください。添付HTMLのプレビューでは学習機能が動かない場合があります。</p></section></main>
 <footer>英検の過去問題を使った個人学習用ツールです。日本英語検定協会の公式サービスではありません。<br>未ログイン時はこの端末・ブラウザに保存されます。Googleログイン時は同じアカウントの端末間で学習記録を同期します。共有端末では利用後にログアウトしてください。<br>全1,585問をレビュー対象として、構文・語法・熟語・コロケーション・文脈の手がかりを問題ごとに判定して表示します。</footer>
 <div id="toast" class="toast" role="status" hidden></div><input id="importFile" type="file" accept="application/json,.json" hidden>
@@ -527,8 +527,8 @@ render();
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js";
 import {
-  getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect,
-  signOut, onAuthStateChanged
+  getAuth, GoogleAuthProvider, signInWithPopup,
+  signOut, onAuthStateChanged, setPersistence, browserLocalPersistence
 } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, setDoc, serverTimestamp
@@ -558,6 +558,9 @@ const cloudDot=document.getElementById("cloudDot");
 
 let currentUser=null;
 let cloudReady=false;
+let authReady=false;
+let signingIn=false;
+let loginAttempt=0;
 let saveTimer=null;
 let saving=false;
 let saveAgain=false;
@@ -574,6 +577,29 @@ function shortName(user){
 }
 function cloudRef(user){
   return doc(db,"users",user.uid,"apps","eiken-retry");
+}
+function resetLoggedOutUI(note="端末保存"){
+  signingIn=false;
+  loginBtn.disabled=!authReady;
+  loginBtn.classList.remove("signed-in");
+  logoutBtn.hidden=true;
+  setCloudUI("","Googleログイン",note);
+}
+function loginErrorMessage(err){
+  switch(err?.code){
+    case "auth/popup-blocked":
+      return "Googleログイン画面がブロックされました。ブラウザでこのサイトのポップアップを許可して、もう一度押してください。";
+    case "auth/popup-closed-by-user":
+      return "Googleログインをキャンセルしました。";
+    case "auth/cancelled-popup-request":
+      return "ログイン処理をやり直してください。";
+    case "auth/unauthorized-domain":
+      return "このサイトがFirebaseの承認済みドメインに登録されていません。";
+    case "auth/network-request-failed":
+      return "通信エラーでGoogleログインできませんでした。ネット接続を確認してください。";
+    default:
+      return `Googleログインを完了できませんでした${err?.code?`（${err.code}）`:""}。`;
+  }
 }
 async function saveNow(){
   if(!currentUser||!cloudReady||saving)return;
@@ -608,23 +634,51 @@ function saveSoon(){
 window.firebaseRetryCloud={saveSoon,saveNow};
 
 loginBtn.addEventListener("click",async()=>{
-  if(currentUser)return;
+  if(currentUser||!authReady||signingIn)return;
+
+  signingIn=true;
+  const attempt=++loginAttempt;
   loginBtn.disabled=true;
-  setCloudUI("busy","ログイン中…","Google認証");
+  setCloudUI("busy","Googleを開いています…","別ウィンドウで認証");
+
+  // If the Google window is hidden behind the browser or blocked without a prompt,
+  // don't leave the app looking frozen forever.
+  const slowTimer=setTimeout(()=>{
+    if(signingIn&&attempt===loginAttempt){
+      setCloudUI("busy","Google認証待ち","別ウィンドウを確認");
+      window.retryAppBridge?.notify?.("Googleのログイン画面を確認してください。表示されない場合は、このサイトのポップアップを許可してください。");
+    }
+  },4500);
+
+  const recoverTimer=setTimeout(()=>{
+    if(signingIn&&attempt===loginAttempt&&!currentUser){
+      signingIn=false;
+      loginBtn.disabled=false;
+      setCloudUI("error","Googleログイン","再試行できます");
+      window.retryAppBridge?.notify?.("認証が完了していません。Google画面が出なかった場合はポップアップを許可して、もう一度お試しください。");
+    }
+  },20000);
+
   try{
     await signInWithPopup(auth,provider);
   }catch(err){
-    if(err?.code==="auth/popup-blocked"){
-      await signInWithRedirect(auth,provider);
-      return;
+    console.error("Google sign-in failed",err);
+    if(attempt===loginAttempt){
+      signingIn=false;
+      loginBtn.disabled=false;
+      setCloudUI("error","Googleログイン","認証できませんでした");
+      window.retryAppBridge?.notify?.(loginErrorMessage(err));
     }
-    console.error(err);
-    setCloudUI("error","Googleログイン","ログイン失敗");
-    window.retryAppBridge?.notify?.("Googleログインを完了できませんでした。");
   }finally{
-    loginBtn.disabled=false;
+    clearTimeout(slowTimer);
+    clearTimeout(recoverTimer);
+    if(attempt===loginAttempt && !currentUser){
+      signingIn=false;
+      loginBtn.disabled=false;
+    }
   }
 });
+
 logoutBtn.addEventListener("click",async()=>{
   try{
     await saveNow();
@@ -635,19 +689,28 @@ logoutBtn.addEventListener("click",async()=>{
   }
 });
 
+try{
+  await setPersistence(auth,browserLocalPersistence);
+}catch(err){
+  console.error("Auth persistence setup failed",err);
+}
+
 onAuthStateChanged(auth,async user=>{
+  authReady=true;
   currentUser=user||null;
   cloudReady=false;
+  loginAttempt++;
+
   if(!user){
-    logoutBtn.hidden=true;
-    loginBtn.classList.remove("signed-in");
-    setCloudUI("","Googleログイン","端末保存");
+    resetLoggedOutUI("端末保存");
     return;
   }
 
+  signingIn=false;
+  loginBtn.disabled=true;
   logoutBtn.hidden=false;
   loginBtn.classList.add("signed-in");
-  setCloudUI("busy",shortName(user),"読み込み中…");
+  setCloudUI("busy",shortName(user),"クラウド読込中…");
 
   try{
     const ref=cloudRef(user);
@@ -665,11 +728,11 @@ onAuthStateChanged(auth,async user=>{
     console.error("Cloud load failed",err);
     cloudReady=false;
     setCloudUI("error",shortName(user),"Firestore設定を確認");
-    window.retryAppBridge?.notify?.("ログインしましたが、クラウド記録を読み書きできません。Firestoreのルールを確認してください。");
+    window.retryAppBridge?.notify?.("ログインは成功しましたが、クラウド記録を読み書きできません。Firestoreのルールを確認してください。");
+  }finally{
+    loginBtn.disabled=false;
   }
 });
-
-window.addEventListener("beforeunload",()=>{ if(currentUser&&cloudReady&&!saving) saveNow(); });
 </script>
 
 </body></html>
