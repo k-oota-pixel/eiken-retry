@@ -1,0 +1,54 @@
+name: Inspect retry application code
+
+on:
+  push:
+    paths:
+      - '.github/workflows/coin-reward-inspect-code.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract runtime code snippets
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('index.html').read_text(encoding='utf-8')
+          # The question bank occupies most of the file. Runtime code is near the tail.
+          start=max(0,len(s)-260000)
+          tail=s[start:]
+          pats=[
+            r'addEventListener\([^\n]{0,80}', r'\.onclick\s*=', r'function\s+[A-Za-z_$][\w$]*\s*\(',
+            r'async\s+function\s+[A-Za-z_$][\w$]*\s*\(', r'option', r'feedback', r'answer_number',
+            r'current[A-Za-z_$]*', r'QUESTIONS\[', r'questions\[', r'state\.', r'total\s*[:+]?=',
+            r'correct\s*[:+]?=', r'lastAttempt', r'saveSoon', r'saveNow'
+          ]
+          found=[]
+          centers=[]
+          for pat in pats:
+            for m in re.finditer(pat,tail,re.I):
+              absolute=start+m.start()
+              if any(abs(absolute-c)<450 for c in centers):
+                continue
+              centers.append(absolute)
+              a=max(0,m.start()-900); b=min(len(tail),m.end()+1300)
+              found.append(f'\n===== {pat!r} @ {absolute} =====\n'+tail[a:b]+'\n')
+              if len(found)>=70: break
+            if len(found)>=70: break
+          # Always include the last 22k chars, which contains initialization/event wiring.
+          found.append('\n===== LAST 22000 CHARS =====\n'+s[-22000:])
+          Path('.coin-retry-code.txt').write_text(''.join(found),encoding='utf-8')
+          PY
+      - name: Commit inspection output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .coin-retry-code.txt
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Add retry runtime inspection output"
+          git push
