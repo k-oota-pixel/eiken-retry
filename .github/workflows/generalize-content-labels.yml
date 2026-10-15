@@ -1,0 +1,45 @@
+name: Generalize retry notebook labels
+
+on:
+  push:
+    paths:
+      - '.github/workflows/generalize-content-labels.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update visible labels
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          replacements={
+            '<title>英検 リトライノート｜間違いを、できるに。</title>':'<title>語彙文法問題リトライノート｜間違いを、できるに。</title>',
+            '<span>リトライノート<small>EIKEN VOCABULARY</small></span>':'<span>語彙文法問題リトライノート<small>VOCABULARY &amp; GRAMMAR</small></span>',
+            '<label>出題する級<select id="grade">':'<label>難易度<select id="grade">',
+            "${g||'すべて'} · ${QUESTIONS.filter(q=>!g||q.grade===g).length}問":"${g?g+'程度':'すべて'} · ${QUESTIONS.filter(q=>!g||q.grade===g).length}問",
+          }
+          missing=[]
+          for old,new in replacements.items():
+              if old not in s:
+                  missing.append(old)
+              else:
+                  s=s.replace(old,new,1)
+          if missing:
+              raise SystemExit('targets not found: '+repr(missing))
+          p.write_text(s,encoding='utf-8')
+          PY
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet && exit 0
+          git commit -m "Generalize retry notebook labels"
+          git push
