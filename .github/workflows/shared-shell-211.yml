@@ -1,0 +1,44 @@
+name: Prepare verified Monstudy 2.1.1 sources
+on:
+  push:
+    branches: ['codex/shared-shell-2.1.1']
+    paths: ['.github/workflows/shared-shell-211.yml']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/shared-shell-2.1.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply verified release changes
+        shell: python
+        run: |
+          import base64,json,pathlib,subprocess
+          expected=json.loads(base64.b64decode('eyJpbmRleC5odG1sIjogIjRhY2ZkZWViYmRjZTJmMjgyYTVjZjkzOTE5YTgxOTZlMzkyYmE4MDIifQ=='))
+          for path,wanted in expected.items():
+              p=pathlib.Path(path)
+              if wanted is None:
+                  assert not p.exists(), 'Unexpected existing file: '+path
+              else:
+                  actual=subprocess.check_output(['git','hash-object',path],text=True).strip()
+                  assert actual==wanted, 'Concurrent source change: '+path
+          patch=base64.b64decode('ZGlmZiAtLWdpdCBhL2luZGV4Lmh0bWwgYi9pbmRleC5odG1sCmluZGV4IDRhY2ZkZWUuLmI4NzRmZmQgMTAwNjQ0Ci0tLSBhL2luZGV4Lmh0bWwKKysrIGIvaW5kZXguaHRtbApAQCAtMyArMywzIEBACi08aGVhZD48bWV0YSBjaGFyc2V0PSJ1dGYtOCI+PG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCxpbml0aWFsLXNjYWxlPTEiPjxtZXRhIG5hbWU9InRoZW1lLWNvbG9yIiBjb250ZW50PSIjMTk0ZDQxIj48dGl0bGU+6Kqe5b2Z5paH5rOV5ZWP6aGM44Oq44OI44Op44Kk44OO44O844OI772c6ZaT6YGV44GE44KS44CB44Gn44GN44KL44Gr44CCPC90aXRsZT4NCis8aGVhZD4NCis8c2NyaXB0IHNyYz0iaHR0cHM6Ly9rLW9vdGEtcGl4ZWwuZ2l0aHViLmlvL2VuZ2xpc2gtcGxheXJvb20vc2hlbGwtYnJpZGdlLmpzP3Y9Mi4xLjEiPjwvc2NyaXB0Pg0KKzxtZXRhIGNoYXJzZXQ9InV0Zi04Ij48bWV0YSBuYW1lPSJ2aWV3cG9ydCIgY29udGVudD0id2lkdGg9ZGV2aWNlLXdpZHRoLGluaXRpYWwtc2NhbGU9MSI+PG1ldGEgbmFtZT0idGhlbWUtY29sb3IiIGNvbnRlbnQ9IiMxOTRkNDEiPjx0aXRsZT7oqp7lvZnmlofms5XllY/poYzjg6rjg4jjg6njgqTjg47jg7zjg4jvvZzplpPpgZXjgYTjgpLjgIHjgafjgY3jgovjgavjgII8L3RpdGxlPg0KQEAgLTEwMCwwICsxMDMgQEAgY29uc3QgYXBwPWRvY3VtZW50LmdldEVsZW1lbnRCeUlkKCdhcHAnKTsKK2dsb2JhbFRoaXMuTW9uc3R1ZHlNYXRlcmlhbD8uc2V0QWN0aXZpdHlHdWFyZCgoKT0+Qm9vbGVhbihwYWdlPT09InF1aXoiICYmIHN0YXRlLnNlc3Npb24pKTsNCkBAIC00NzYgKzQ3OSBAQCBhc3luYyBmdW5jdGlvbiBzYXZlTm93KCl7Ci0gIHNhdmluZz10cnVlOworICBzYXZpbmc9dHJ1ZTsNCkBAIC00ODkgKzQ5MiBAQCBhc3luYyBmdW5jdGlvbiBzYXZlTm93KCl7Ci0gICAgaWYoY3VycmVudFVzZXI/LnVpZD09PXNhdmluZ1VpZClkb2N1bWVudC5kaXNwYXRjaEV2ZW50KG5ldyBDdXN0b21FdmVudCgicmV0cnktY2xvdWQtc2F2ZWQiLHtkZXRhaWw6e3VpZDpzYXZpbmdVaWR9fSkpOworICAgIGlmKGN1cnJlbnRVc2VyPy51aWQ9PT1zYXZpbmdVaWQpZG9jdW1lbnQuZGlzcGF0Y2hFdmVudChuZXcgQ3VzdG9tRXZlbnQoInJldHJ5LWNsb3VkLXNhdmVkIix7ZGV0YWlsOnt1aWQ6c2F2aW5nVWlkfX0pKTsNCg==')
+          subprocess.run(['git','apply','--check','--unidiff-zero','--whitespace=nowarn','-'],input=patch,check=True)
+          subprocess.run(['git','apply','--unidiff-zero','--whitespace=nowarn','-'],input=patch,check=True)
+          pathlib.Path('/tmp/monstudy-changed.json').write_text(json.dumps(list(expected)))
+      - name: Commit verified source to preparation branch
+        shell: python
+        run: |
+          import json,subprocess
+          files=json.load(open('/tmp/monstudy-changed.json'))
+          subprocess.run(['git','config','user.name','github-actions[bot]'],check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
+          subprocess.run(['git','add','--',*files],check=True)
+          subprocess.run(['git','commit','-m','Implement shared Monstudy 2.1.1 navigation and material integration'],check=True)
+          subprocess.run(['git','push','origin','HEAD:codex/shared-shell-2.1.1'],check=True)
