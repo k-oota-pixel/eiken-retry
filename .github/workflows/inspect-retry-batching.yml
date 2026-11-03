@@ -1,0 +1,33 @@
+name: Inspect Retry Batching
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-retry-batching.yml'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print retry batching contexts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          needles=['RETRY_OUTBOX_PREFIX','recordRetryAttempt','flushRetryAttempts','retryAppBridge','getCloudPayload','EnglishPlayroomCoins','retryCoinProgress','sessionSize','questionCount','5問','10問','20問']
+          lines=s.splitlines()
+          seen=set()
+          for needle in needles:
+              hits=[i for i,line in enumerate(lines) if needle in line]
+              print(f'===== {needle} hits={len(hits)} =====')
+              for i in hits[:12]:
+                  a=max(0,i-8); b=min(len(lines),i+18)
+                  key=(a,b)
+                  if key in seen: continue
+                  seen.add(key)
+                  print(f'--- lines {a+1}-{b} ---')
+                  for n in range(a,b): print(f'{n+1}: {lines[n]}')
+          PY
