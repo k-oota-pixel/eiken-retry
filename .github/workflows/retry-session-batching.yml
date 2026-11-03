@@ -1,0 +1,163 @@
+name: Implement retry session batching
+
+on:
+  push:
+    paths:
+      - '.github/workflows/retry-session-batching.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Batch retry cloud/reward processing at completed session
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          # Preserve first-attempt metadata inside each local session answer.
+          p=Path('assets/trainer-core.js'); s=p.read_text(encoding='utf-8')
+          old="const result={id:question.id,choice,correct,at:now,wasPending:old.pending};s.answers.push(result);"
+          new="const result={id:question.id,choice,correct,at:now,wasPending:old.pending,first:old.attempts===0,previousMistakes:old.mistakes||0,previousWrongAt:old.lastCorrect===false?(old.updatedAt||0):0};s.answers.push(result);"
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+          old="return {id:a.id,choice:a.choice,correct:a.correct,at:a.at,wasPending:!!a.wasPending};"
+          new="return {id:a.id,choice:a.choice,correct:a.correct,at:a.at,wasPending:!!a.wasPending,first:typeof a.first==='boolean'?a.first:out.records[a.id].attempts===1,previousMistakes:integer(a.previousMistakes)?a.previousMistakes:Math.max(0,out.records[a.id].mistakes-(a.correct?0:1)),previousWrongAt:Number.isFinite(a.previousWrongAt)?Math.max(0,a.previousWrongAt):0};"
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+
+          p=Path('assets/retry-app.js'); s=p.read_text(encoding='utf-8')
+          old="function persist(){if(readOnly)return false;try{state.updatedAt=Date.now();localStorage.setItem(KEY,JSON.stringify(state));if(!suppressCloudSave)window.firebaseRetryCloud?.saveSoon?.();return true;}catch(e){showAlert('記録をブラウザに保存できません。この画面では学習を続けられますが、閉じる前に「記録を保存」でバックアップしてください。');return false;}}"
+          new="function cloudSaveAllowed(){const session=state.session;return !session||session.index>=session.ids.length;}\nfunction persist({cloud=null}={}){if(readOnly)return false;try{state.updatedAt=Date.now();localStorage.setItem(KEY,JSON.stringify(state));const shouldCloud=cloud===true||(cloud!==false&&cloudSaveAllowed());if(!suppressCloudSave&&shouldCloud)window.firebaseRetryCloud?.saveSoon?.();return true;}catch(e){showAlert('記録をブラウザに保存できません。この画面では学習を続けられますが、閉じる前に「記録を保存」でバックアップしてください。');return false;}}"
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+
+          marker="const stats=q=>C.stat(state,q.id);\n"
+          helper=r'''const FINALIZED_SESSION_KEY='eiken-retry-finalized-sessions-v1';
+let finalizedSessions=new Set();
+try{finalizedSessions=new Set(JSON.parse(localStorage.getItem(FINALIZED_SESSION_KEY)||'[]'));}catch{}
+let finalizeRetryTimer=0,finalizingSession='';
+function rememberFinalizedSession(id){finalizedSessions.add(String(id));try{localStorage.setItem(FINALIZED_SESSION_KEY,JSON.stringify([...finalizedSessions].slice(-100)));}catch{}}
+async function finalizeCompletedSession(session=state.session){
+  if(!session||session.index<session.ids.length||session.answers.length<session.ids.length||finalizedSessions.has(String(session.id))||finalizingSession===String(session.id))return;
+  const api=window.EnglishPlayroomCoins;
+  if(!api?.recordRetrySession){clearTimeout(finalizeRetryTimer);finalizeRetryTimer=setTimeout(()=>void finalizeCompletedSession(session),350);return;}
+  finalizingSession=String(session.id);
+  const attempts=session.answers.map(answer=>{
+    const q=BY_ID.get(answer.id),r=q?stats(q):null;
+    return q?{questionId:q.id,grade:q.grade,correct:!!answer.correct,first:typeof answer.first==='boolean'?answer.first:(r?.attempts===1),previousMistakes:Number.isInteger(answer.previousMistakes)?answer.previousMistakes:Math.max(0,(r?.mistakes||0)-(answer.correct?0:1)),previousWrongAt:Number.isFinite(answer.previousWrongAt)?answer.previousWrongAt:0,series:session.mode==='series'}:null;
+  }).filter(Boolean);
+  try{
+    const result=await api.recordRetrySession({sessionId:String(session.id),attempts});
+    if(result?.reason!=='signed-out')rememberFinalizedSession(session.id);
+  }catch(error){console.warn('Retry session finalize deferred',error);}
+  finally{finalizingSession='';}
+}
+'''
+          if 'function finalizeCompletedSession' not in s:
+            assert marker in s;s=s.replace(marker,marker+helper,1)
+
+          old="window.addEventListener('pagehide',()=>{closeScreenAway();window.firebaseRetryCloud?.saveNow?.();});"
+          new="window.addEventListener('pagehide',()=>{closeScreenAway();if(cloudSaveAllowed())window.firebaseRetryCloud?.saveNow?.();});"
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+
+          old="function render(){document.querySelectorAll('nav [data-page]').forEach(b=>{const active=b.dataset.page===page;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});app.innerHTML=page==='home'?home():page==='review'?review():page==='history'?history():quiz();if(page==='quiz'&&state.session&&state.session.index<state.session.ids.length&&state.session.answers[state.session.index]){const q=BY_ID.get(state.session.ids[state.session.index]);if(q)setTimeout(()=>loadLearningHelp(q),0);}}"
+          new="function render(){document.querySelectorAll('nav [data-page]').forEach(b=>{const active=b.dataset.page===page;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});app.innerHTML=page==='home'?home():page==='review'?review():page==='history'?history():quiz();if(page==='quiz'&&state.session&&state.session.index<state.session.ids.length&&state.session.answers[state.session.index]){const q=BY_ID.get(state.session.ids[state.session.index]);if(q)setTimeout(()=>loadLearningHelp(q),0);}if(state.session&&state.session.index>=state.session.ids.length)setTimeout(()=>void finalizeCompletedSession(state.session),0);}" 
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+
+          s=s.replace("const titlePrevious={...stats(q)};","")
+          s=s.replace("window.EnglishPlayroomCoins?.recordRetryAttempt?.(q.id);","")
+          s=re.sub(r"window\.EnglishPlayroomCoins\?\.recordTitleEvent\?\.\('eiken-retry',\{kind:'answer',itemId:q\.id,grade:q\.grade,correct:Number\(b\.dataset\.choice\)===q\.answer_number,series:s\.mode==='series',previousMistakes:titlePrevious\.mistakes\|\|0,previousWrongAt:titlePrevious\.lastCorrect===false\?titlePrevious\.updatedAt\|\|0:0\}\);","",s)
+          assert "recordRetryAttempt?.(q.id)" not in s and "recordTitleEvent?.('eiken-retry'" not in s
+
+          old="case'next':if(C.advance(state)){persist();render();window.scrollTo({top:0,behavior:'instant'});}break;"
+          new="case'next':if(C.advance(state)){const finished=state.session.index>=state.session.ids.length;persist({cloud:finished});render();if(finished)void finalizeCompletedSession(state.session);window.scrollTo({top:0,behavior:'instant'});}break;"
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+
+          old="notify:(message)=>toast(message)\n};"
+          new="notify:(message)=>toast(message),\n  canCloudSave:()=>cloudSaveAllowed()\n};"
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+
+          # Avoid an unconditional write on every login; only initialize a missing cloud doc.
+          p=Path('assets/retry-cloud.js'); s=p.read_text(encoding='utf-8')
+          old='''    if(snap.exists()){
+      const ok=window.retryAppBridge?.applyCloudSnapshot?.(snap.data());
+      if(!ok)throw new Error("クラウド記録の形式を確認できません。");
+      window.retryAppBridge?.notify?.("クラウドの学習記録と同期しました。");
+    }else{
+      window.retryAppBridge?.notify?.("このアカウントのクラウド保存を開始しました。");
+    }
+    cloudReady=true;
+    await saveNow();'''
+          new='''    if(snap.exists()){
+      const ok=window.retryAppBridge?.applyCloudSnapshot?.(snap.data());
+      if(!ok)throw new Error("クラウド記録の形式を確認できません。");
+      window.retryAppBridge?.notify?.("クラウドの学習記録と同期しました。");
+      cloudReady=true;
+      setCloudUI("ok",shortName(user),"クラウド同期済み");
+    }else{
+      window.retryAppBridge?.notify?.("このアカウントのクラウド保存を開始しました。");
+      cloudReady=true;
+      await saveNow();
+    }'''
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+          old='''  try{
+    await saveNow();
+    await signOut(auth);'''
+          new='''  try{
+    if(window.retryAppBridge?.canCloudSave?.()!==false)await saveNow();
+    await signOut(auth);'''
+          if new not in s:
+            assert old in s;s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+
+          # Small static question index for the admin ranking popup (no Firestore read).
+          raw=Path('assets/question-data.js').read_text(encoding='utf-8').strip()
+          prefix='window.RETRY_QUESTIONS = '
+          assert raw.startswith(prefix) and raw.endswith(';')
+          questions=json.loads(raw[len(prefix):-1])
+          index=[{k:q.get(k) for k in ('id','grade','year','session','question_number','question','answer_text')} for q in questions]
+          Path('assets/question-index.json').write_text(json.dumps(index,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+          PY
+      - name: Validate retry app
+        run: |
+          node --check assets/trainer-core.js
+          node --check assets/retry-app.js
+          node --check assets/retry-cloud.js
+          python - <<'PY'
+          import json
+          x=json.load(open('assets/question-index.json',encoding='utf-8'))
+          assert len(x)>100 and all(row.get('id') and row.get('grade') for row in x)
+          print('question index',len(x))
+          PY
+          grep -q 'recordRetrySession' assets/retry-app.js
+          ! grep -q "recordRetryAttempt?.(q.id)" assets/retry-app.js
+      - name: Commit retry batching
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add assets/trainer-core.js assets/retry-app.js assets/retry-cloud.js assets/question-index.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Batch retry saves and rewards at session completion'
+          git pull --rebase origin main
+          git push origin HEAD:main
