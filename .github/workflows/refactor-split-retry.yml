@@ -1,0 +1,124 @@
+name: Refactor split retry HTML
+
+on:
+  push:
+    paths:
+      - '.github/workflows/refactor-split-retry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Split index.html safely
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, json
+
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          if 'assets/retry-app.js?v=split1' in s:
+              print('Already split; nothing to do.')
+              raise SystemExit(0)
+
+          Path('assets').mkdir(exist_ok=True)
+
+          # Main unlabelled CSS block (preserve small access/home styles inline).
+          styles=list(re.finditer(r'<style(?P<attrs>[^>]*)>(?P<body>.*?)</style>',s,re.S|re.I))
+          main_styles=[m for m in styles if not m.group('attrs').strip()]
+          assert len(main_styles)==1, f'Expected one main style block, got {len(main_styles)}'
+          sm=main_styles[0]
+          css=sm.group('body').strip()+'\n'
+          assert len(css)>10000
+          Path('assets/retry.css').write_text(css,encoding='utf-8')
+          s=s[:sm.start()]+'<link rel="stylesheet" href="./assets/retry.css?v=split1">'+s[sm.end():]
+
+          def extract_json_script(html, script_id, global_name, out_path):
+              pat=re.compile(r'<script\s+id=["\']'+re.escape(script_id)+r'["\']\s+type=["\']application/json["\']\s*>(.*?)</script>',re.S|re.I)
+              m=pat.search(html)
+              if not m:
+                  # tolerate attr order variation
+                  pat=re.compile(r'<script(?=[^>]*\bid=["\']'+re.escape(script_id)+r'["\'])(?=[^>]*\btype=["\']application/json["\'])[^>]*>(.*?)</script>',re.S|re.I)
+                  m=pat.search(html)
+              assert m, f'Missing {script_id}'
+              raw=m.group(1).strip()
+              json.loads(raw)  # validate before converting to JS global
+              Path(out_path).write_text(f'window.{global_name} = '+raw+';\n',encoding='utf-8')
+              tag=f'<script src="./{out_path}?v=split1"></script>'
+              return html[:m.start()]+tag+html[m.end():]
+
+          s=extract_json_script(s,'question-data','RETRY_QUESTIONS','assets/question-data.js')
+          s=extract_json_script(s,'choice-ja-data','RETRY_CHOICE_JA','assets/choice-ja-data.js')
+
+          scripts=list(re.finditer(r'<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>',s,re.S|re.I))
+          trainer=next((m for m in scripts if 'const TrainerCore' in m.group('body')),None)
+          app=next((m for m in scripts if 'const QUESTIONS=' in m.group('body') and 'retryAppBridge' in m.group('body')),None)
+          cloud=next((m for m in scripts if 'initializeApp' in m.group('body') and 'firebase-app.js' in m.group('body')),None)
+          assert trainer and app and cloud, 'Could not identify trainer/app/cloud scripts'
+
+          def app_rewrites(body):
+              body2=re.sub(r"JSON\.parse\(document\.getElementById\((['\"])question-data\1\)\.textContent\)","(window.RETRY_QUESTIONS||[])",body)
+              body2=re.sub(r"JSON\.parse\(document\.getElementById\((['\"])choice-ja-data\1\)\.textContent\)","(window.RETRY_CHOICE_JA||{})",body2)
+              assert 'question-data' not in body2, 'Unresolved question-data reference'
+              assert 'choice-ja-data' not in body2, 'Unresolved choice-ja-data reference'
+              return body2
+
+          replacements=[]
+          for m,path,module in [
+              (trainer,'assets/trainer-core.js',False),
+              (app,'assets/retry-app.js',False),
+              (cloud,'assets/retry-cloud.js',True),
+          ]:
+              body=m.group('body').strip()+'\n'
+              if m is app: body=app_rewrites(body)
+              Path(path).write_text(body,encoding='utf-8')
+              tag=f'<script type="module" src="./{path}?v=split1"></script>' if module else f'<script src="./{path}?v=split1"></script>'
+              replacements.append((m.start(),m.end(),tag))
+
+          # Positions above refer to current s. Replace from end backwards.
+          for a,b,tag in sorted(replacements,reverse=True):
+              s=s[:a]+tag+s[b:]
+
+          assert 'id="question-data"' not in s
+          assert 'id="choice-ja-data"' not in s
+          assert 'const TrainerCore' not in s
+          assert 'const QUESTIONS=' not in s
+          assert 'initializeApp' not in s
+          p.write_text(s,encoding='utf-8')
+          print('index bytes after split:',len(s.encode('utf-8')))
+          assert len(s.encode('utf-8'))<120000, 'index.html is still unexpectedly large'
+          PY
+      - name: Validate split JavaScript and references
+        run: |
+          node --check assets/question-data.js
+          node --check assets/choice-ja-data.js
+          node --check assets/trainer-core.js
+          node --check assets/retry-app.js
+          node --check assets/retry-cloud.js
+          grep -q 'assets/retry.css?v=split1' index.html
+          grep -q 'assets/question-data.js?v=split1' index.html
+          grep -q 'assets/retry-app.js?v=split1' index.html
+          grep -q 'assets/retry-cloud.js?v=split1' index.html
+          wc -c index.html assets/*
+      - name: Commit split
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html assets/
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Split retry notebook HTML into maintainable assets'
+          git pull --rebase origin main
+          git push origin HEAD:main
