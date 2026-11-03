@@ -1,0 +1,81 @@
+name: Inspect retry structure
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-retry-structure.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect giant HTML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re, hashlib
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          lines=s.splitlines()
+          out=[]
+          out.append(f'bytes={len(s.encode("utf-8"))}')
+          out.append(f'chars={len(s)}')
+          out.append(f'lines={len(lines)}')
+          out.append(f'sha256={hashlib.sha256(s.encode()).hexdigest()}')
+          out.append('')
+          styles=list(re.finditer(r'<style(?P<attrs>[^>]*)>(?P<body>.*?)</style>',s,re.S|re.I))
+          out.append(f'style_blocks={len(styles)}')
+          for i,m in enumerate(styles):
+              line=s.count('\n',0,m.start())+1
+              out.append(f'  style[{i}] line={line} chars={len(m.group("body"))} attrs={m.group("attrs").strip()!r}')
+          scripts=list(re.finditer(r'<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>',s,re.S|re.I))
+          out.append(f'script_blocks={len(scripts)}')
+          for i,m in enumerate(scripts):
+              line=s.count('\n',0,m.start())+1
+              body=m.group('body')
+              attrs=' '.join(m.group('attrs').split())
+              sample=' '.join(body.strip().split())[:180]
+              out.append(f'  script[{i}] line={line} chars={len(body)} attrs={attrs!r} sample={sample!r}')
+          out.append('')
+          pats=['persist','getCloudPayload','recordRetryAttempt','retryAppBridge','RETRY_BATCH_SIZE','RETRY_OUTBOX_PREFIX','EnglishPlayroomCoins','retry-cloud-saved','monstudy:retry-cloud-saved','questions','QUESTION','questionBank','problem','items']
+          for pat in pats:
+              out.append(f'PATTERN {pat}')
+              hits=[]
+              for m in re.finditer(re.escape(pat),s,re.I):
+                  line=s.count('\n',0,m.start())+1
+                  lo=max(0,m.start()-120); hi=min(len(s),m.end()+220)
+                  snippet=' '.join(s[lo:hi].split())
+                  hits.append((line,snippet[:420]))
+                  if len(hits)>=12: break
+              out.append(f'  count_at_least={len(hits)}')
+              for line,sn in hits: out.append(f'  L{line}: {sn}')
+          out.append('')
+          out.append('TOP_LEVEL_LARGE_ASSIGNMENTS')
+          for m in re.finditer(r'\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([\[{])',s):
+              name=m.group(1); op=m.group(2); line=s.count('\n',0,m.start())+1
+              if line<1: continue
+              # report likely data declarations, prioritizing names and nearby size only
+              if re.search(r'(question|problem|item|data|bank|quiz|pool|vocab)',name,re.I):
+                  sn=' '.join(s[m.start():m.start()+260].split())
+                  out.append(f'  L{line} {name} opener={op} {sn[:260]}')
+          Path('retry_structure.txt').write_text('\n'.join(out)+'\n',encoding='utf-8')
+          PY
+      - name: Commit inspection report
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add retry_structure.txt
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Add retry structure inspection report [skip ci]'
+          git pull --rebase origin main
+          git push origin HEAD:main
