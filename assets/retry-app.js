@@ -9,9 +9,30 @@ let state=C.blank(),page='home',series=1,recordFilter='mistakes',toastTimer,read
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function showAlert(message){const el=document.getElementById('storageAlert');el.textContent=message;el.hidden=false;}
 try{const raw=localStorage.getItem(KEY);if(raw)state=C.validate(JSON.parse(raw),QUESTIONS);}catch(e){readOnly=true;showAlert('保存された記録を読み込めませんでした。元の記録を保護するため、保存を停止しています。「記録」からバックアップを取り込むか、初期化してください。');}
-function persist(){if(readOnly)return false;try{state.updatedAt=Date.now();localStorage.setItem(KEY,JSON.stringify(state));if(!suppressCloudSave)window.firebaseRetryCloud?.saveSoon?.();return true;}catch(e){showAlert('記録をブラウザに保存できません。この画面では学習を続けられますが、閉じる前に「記録を保存」でバックアップしてください。');return false;}}
+function cloudSaveAllowed(){const session=state.session;return !session||session.index>=session.ids.length;}
+function persist({cloud=null}={}){if(readOnly)return false;try{state.updatedAt=Date.now();localStorage.setItem(KEY,JSON.stringify(state));const shouldCloud=cloud===true||(cloud!==false&&cloudSaveAllowed());if(!suppressCloudSave&&shouldCloud)window.firebaseRetryCloud?.saveSoon?.();return true;}catch(e){showAlert('記録をブラウザに保存できません。この画面では学習を続けられますが、閉じる前に「記録を保存」でバックアップしてください。');return false;}}
 function toast(message){clearTimeout(toastTimer);const el=document.getElementById('toast');el.textContent=message;el.hidden=false;toastTimer=setTimeout(()=>el.hidden=true,4500);}
 const stats=q=>C.stat(state,q.id);
+const FINALIZED_SESSION_KEY='eiken-retry-finalized-sessions-v1';
+let finalizedSessions=new Set();
+try{finalizedSessions=new Set(JSON.parse(localStorage.getItem(FINALIZED_SESSION_KEY)||'[]'));}catch{}
+let finalizeRetryTimer=0,finalizingSession='';
+function rememberFinalizedSession(id){finalizedSessions.add(String(id));try{localStorage.setItem(FINALIZED_SESSION_KEY,JSON.stringify([...finalizedSessions].slice(-100)));}catch{}}
+async function finalizeCompletedSession(session=state.session){
+  if(!session||session.index<session.ids.length||session.answers.length<session.ids.length||finalizedSessions.has(String(session.id))||finalizingSession===String(session.id))return;
+  const api=window.EnglishPlayroomCoins;
+  if(!api?.recordRetrySession){clearTimeout(finalizeRetryTimer);finalizeRetryTimer=setTimeout(()=>void finalizeCompletedSession(session),350);return;}
+  finalizingSession=String(session.id);
+  const attempts=session.answers.map(answer=>{
+    const q=BY_ID.get(answer.id),r=q?stats(q):null;
+    return q?{questionId:q.id,grade:q.grade,correct:!!answer.correct,first:typeof answer.first==='boolean'?answer.first:(r?.attempts===1),previousMistakes:Number.isInteger(answer.previousMistakes)?answer.previousMistakes:Math.max(0,(r?.mistakes||0)-(answer.correct?0:1)),previousWrongAt:Number.isFinite(answer.previousWrongAt)?answer.previousWrongAt:0,series:session.mode==='series'}:null;
+  }).filter(Boolean);
+  try{
+    const result=await api.recordRetrySession({sessionId:String(session.id),attempts});
+    if(result?.reason!=='signed-out')rememberFinalizedSession(session.id);
+  }catch(error){console.warn('Retry session finalize deferred',error);}
+  finally{finalizingSession='';}
+}
 
 const PROFILE_KEY='eiken-retry-profile-v1';
 let profile={equippedTitle:'',updatedAt:0};
@@ -274,7 +295,8 @@ window.retryAppBridge={
     profile:cloneJson(profile)
   }),
   applyCloudSnapshot,
-  notify:(message)=>toast(message)
+  notify:(message)=>toast(message),
+  canCloudSave:()=>cloudSaveAllowed()
 };
 
 // Track only an active quiz. blur + visibilitychange describe one departure.
@@ -286,10 +308,10 @@ function finishScreenLog(){const s=state.session;if(!s||s.index<s.ids.length)ret
 window.addEventListener('blur',openScreenAway);
 window.addEventListener('focus',()=>{if(!document.hidden)closeScreenAway();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)openScreenAway();else closeScreenAway();});
-window.addEventListener('pagehide',()=>{closeScreenAway();window.firebaseRetryCloud?.saveNow?.();});
-function render(){document.querySelectorAll('nav [data-page]').forEach(b=>{const active=b.dataset.page===page;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});app.innerHTML=page==='home'?home():page==='review'?review():page==='history'?history():quiz();if(page==='quiz'&&state.session&&state.session.index<state.session.ids.length&&state.session.answers[state.session.index]){const q=BY_ID.get(state.session.ids[state.session.index]);if(q)setTimeout(()=>loadLearningHelp(q),0);}}
+window.addEventListener('pagehide',()=>{closeScreenAway();if(cloudSaveAllowed())window.firebaseRetryCloud?.saveNow?.();});
+function render(){document.querySelectorAll('nav [data-page]').forEach(b=>{const active=b.dataset.page===page;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});app.innerHTML=page==='home'?home():page==='review'?review():page==='history'?history():quiz();if(page==='quiz'&&state.session&&state.session.index<state.session.ids.length&&state.session.answers[state.session.index]){const q=BY_ID.get(state.session.ids[state.session.index]);if(q)setTimeout(()=>loadLearningHelp(q),0);}if(state.session&&state.session.index>=state.session.ids.length)setTimeout(()=>void finalizeCompletedSession(state.session),0);}
 function exportState(){const payload={...state,app:'eiken-retry-notebook',profile:{equippedTitle:profile.equippedTitle||''},exportedAt:new Date().toISOString()};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='eiken-learning-record-'+new Date().toISOString().slice(0,10)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('記録ファイルを保存しました。');}
-document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled)return;if(b.dataset.page){navigate(b.dataset.page);return;}if(b.dataset.series!==undefined){series=Number(b.dataset.series);render();return;}if(b.dataset.choice!==undefined){const s=state.session;if(!s)return;const q=BY_ID.get(s.ids[s.index]);if(!q)return;const titlePrevious={...stats(q)};if(C.answer(state,q,Number(b.dataset.choice))){persist();render();loadLearningHelp(q);window.EnglishPlayroomCoins?.recordRetryAttempt?.(q.id);window.EnglishPlayroomCoins?.recordTitleEvent?.('eiken-retry',{kind:'answer',itemId:q.id,grade:q.grade,correct:Number(b.dataset.choice)===q.answer_number,series:s.mode==='series',previousMistakes:titlePrevious.mistakes||0,previousWrongAt:titlePrevious.lastCorrect===false?titlePrevious.updatedAt||0:0});}return;}switch(b.dataset.action){case'start-new':{let qs=C.pool(QUESTIONS,state,'new');qs=C.shuffle(qs);if(state.settings.count)qs=qs.slice(0,state.settings.count);newSession('new',qs.map(q=>q.id));break;}case'start-series':newSession(series?'series':'review',C.pool(QUESTIONS,state,series?'series':'review',series).map(q=>q.id));break;case'resume':navigate('quiz');break;case'next':if(C.advance(state)){persist();render();window.scrollTo({top:0,behavior:'instant'});}break;case'retry-round':newSession('review',C.retryIds(state));break;case'export':exportState();break;case'import':document.getElementById('importFile').click();break;case'reset':if(confirm('すべての級の学習記録を削除します。元に戻せません。削除しますか？')){state=C.blank();readOnly=false;try{localStorage.removeItem(KEY);localStorage.removeItem(PROFILE_KEY);profile={equippedTitle:'',updatedAt:0};document.getElementById('storageAlert').hidden=true;}catch{}persist();navigate('home');toast('学習記録を初期化しました。');}break;}});
+document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled)return;if(b.dataset.page){navigate(b.dataset.page);return;}if(b.dataset.series!==undefined){series=Number(b.dataset.series);render();return;}if(b.dataset.choice!==undefined){const s=state.session;if(!s)return;const q=BY_ID.get(s.ids[s.index]);if(!q)return;if(C.answer(state,q,Number(b.dataset.choice))){persist();render();loadLearningHelp(q);}return;}switch(b.dataset.action){case'start-new':{let qs=C.pool(QUESTIONS,state,'new');qs=C.shuffle(qs);if(state.settings.count)qs=qs.slice(0,state.settings.count);newSession('new',qs.map(q=>q.id));break;}case'start-series':newSession(series?'series':'review',C.pool(QUESTIONS,state,series?'series':'review',series).map(q=>q.id));break;case'resume':navigate('quiz');break;case'next':if(C.advance(state)){const finished=state.session.index>=state.session.ids.length;persist({cloud:finished});render();if(finished)void finalizeCompletedSession(state.session);window.scrollTo({top:0,behavior:'instant'});}break;case'retry-round':newSession('review',C.retryIds(state));break;case'export':exportState();break;case'import':document.getElementById('importFile').click();break;case'reset':if(confirm('すべての級の学習記録を削除します。元に戻せません。削除しますか？')){state=C.blank();readOnly=false;try{localStorage.removeItem(KEY);localStorage.removeItem(PROFILE_KEY);profile={equippedTitle:'',updatedAt:0};document.getElementById('storageAlert').hidden=true;}catch{}persist();navigate('home');toast('学習記録を初期化しました。');}break;}});
 document.addEventListener('change',e=>{if(['grade','source','count'].includes(e.target.id)){state.settings[e.target.id]=e.target.id==='count'?Number(e.target.value):e.target.value;persist();render();}if(e.target.id==='recordFilter'){recordFilter=e.target.value;render();}});
 document.getElementById('importFile').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;try{if(f.size>5*1024*1024)throw Error('ファイルが大きすぎます。');const incoming=JSON.parse(await f.text());if(incoming.app!=='eiken-retry-notebook')throw Error('このアプリの記録ファイルを選んでください。');const restored=C.validate(incoming,QUESTIONS);if(!confirm('この端末の全学習記録を、ファイルの記録で置き換えますか？'))return;state=restored;readOnly=false;profile={equippedTitle:typeof incoming.profile?.equippedTitle==='string'?incoming.profile.equippedTitle:'',updatedAt:Number(incoming.profile?.updatedAt)||Date.now()};persistProfile();document.getElementById('storageAlert').hidden=true;const saved=persist();navigate('history');toast(saved?'学習記録を取り込みました。':'取り込みましたが、自動保存できません。');}catch(err){alert('取り込めませんでした：'+err.message);}finally{e.target.value='';}});
 window.addEventListener('storage',e=>{

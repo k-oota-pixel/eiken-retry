@@ -156,7 +156,7 @@ loginBtn.addEventListener("click",async()=>{
 
 logoutBtn.addEventListener("click",async()=>{
   try{
-    await saveNow();
+    if(window.retryAppBridge?.canCloudSave?.()!==false)await saveNow();
     await signOut(auth);
   }catch(err){
     console.error(err);
@@ -194,11 +194,13 @@ onAuthStateChanged(auth,async user=>{
       const ok=window.retryAppBridge?.applyCloudSnapshot?.(snap.data());
       if(!ok)throw new Error("クラウド記録の形式を確認できません。");
       window.retryAppBridge?.notify?.("クラウドの学習記録と同期しました。");
+      cloudReady=true;
+      setCloudUI("ok",shortName(user),"クラウド同期済み");
     }else{
       window.retryAppBridge?.notify?.("このアカウントのクラウド保存を開始しました。");
+      cloudReady=true;
+      await saveNow();
     }
-    cloudReady=true;
-    await saveNow();
   }catch(err){
     console.error("Cloud load failed",err);
     cloudReady=false;

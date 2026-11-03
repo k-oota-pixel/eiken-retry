@@ -15,7 +15,7 @@ const TrainerCore = (() => {
     if(!s || s.ids[s.index]!==question.id || s.answers.length!==s.index || ![0,1,2,3,4].includes(choice)) return null;
     const correct=choice===question.answer_number, old=stat(state,question.id);
     state.records[question.id]={attempts:old.attempts+1,mistakes:old.mistakes+(correct?0:1),correct:old.correct+(correct?1:0),pending:!correct,lastChoice:choice,lastCorrect:correct,updatedAt:now};
-    const result={id:question.id,choice,correct,at:now,wasPending:old.pending};s.answers.push(result);state.updatedAt=now;return result;
+    const result={id:question.id,choice,correct,at:now,wasPending:old.pending,first:old.attempts===0,previousMistakes:old.mistakes||0,previousWrongAt:old.lastCorrect===false?(old.updatedAt||0):0};s.answers.push(result);state.updatedAt=now;return result;
   }
   function advance(state) {const s=state.session;if(!s || s.answers.length!==s.index+1)return false;s.index++;return true;}
   function retryIds(state) {return (state.session?.answers||[]).filter(a=>!a.correct && stat(state,a.id).pending).map(a=>a.id);}
@@ -32,7 +32,7 @@ const TrainerCore = (() => {
     const s=input.session;
     if(s) {
       if(!Array.isArray(s.ids)||!s.ids.length||s.ids.length>questions.length||new Set(s.ids).size!==s.ids.length||s.ids.some(id=>!valid.has(id))||!integer(s.index)||s.index>s.ids.length||!Array.isArray(s.answers)||s.answers.length<s.index||s.answers.length>Math.min(s.index+1,s.ids.length)||!['new','review','series'].includes(s.mode))throw Error('途中の学習記録が正しくありません。');
-      const answers=s.answers.map((a,i)=>{if(!a||a.id!==s.ids[i]||![0,1,2,3,4].includes(a.choice)||typeof a.correct!=='boolean'||a.correct!==(a.choice===valid.get(a.id).answer_number)||!Number.isFinite(a.at)||!out.records[a.id])throw Error('回答記録が正しくありません。');return {id:a.id,choice:a.choice,correct:a.correct,at:a.at,wasPending:!!a.wasPending};});
+      const answers=s.answers.map((a,i)=>{if(!a||a.id!==s.ids[i]||![0,1,2,3,4].includes(a.choice)||typeof a.correct!=='boolean'||a.correct!==(a.choice===valid.get(a.id).answer_number)||!Number.isFinite(a.at)||!out.records[a.id])throw Error('回答記録が正しくありません。');return {id:a.id,choice:a.choice,correct:a.correct,at:a.at,wasPending:!!a.wasPending,first:typeof a.first==='boolean'?a.first:out.records[a.id].attempts===1,previousMistakes:integer(a.previousMistakes)?a.previousMistakes:Math.max(0,out.records[a.id].mistakes-(a.correct?0:1)),previousWrongAt:Number.isFinite(a.previousWrongAt)?Math.max(0,a.previousWrongAt):0};});
       out.session={id:String(s.id),mode:s.mode,ids:s.ids.slice(),index:s.index,answers,startedAt:Number(s.startedAt)||0};
     }
     out.screenLogs=Array.isArray(input.screenLogs)?input.screenLogs.filter(r=>r&&typeof r.id==='string'&&Number.isFinite(r.endedAt)&&Number.isSafeInteger(r.count)&&r.count>=0&&Number.isFinite(r.totalMs)&&r.totalMs>=0).slice(-100):[];
