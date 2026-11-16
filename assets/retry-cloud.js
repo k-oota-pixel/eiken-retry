@@ -191,11 +191,20 @@ onAuthStateChanged(auth,async user=>{
     const ref=cloudRef(user);
     const snap=await getDoc(ref);
     if(snap.exists()){
-      const ok=window.retryAppBridge?.applyCloudSnapshot?.(snap.data());
+      const remote=snap.data();
+      const ok=window.retryAppBridge?.applyCloudSnapshot?.(remote);
       if(!ok)throw new Error("クラウド記録の形式を確認できません。");
+      // A previous unfinished session may have answers saved only on this device.
+      // Compare with the already-fetched snapshot; no additional Firestore read.
+      const localRecords=window.retryAppBridge?.getCloudPayload?.()?.state?.records||{};
+      const cloudRecords=remote?.state?.records||{};
+      const needsBackfill=Object.entries(localRecords).some(([id,record])=>
+        !cloudRecords[id]||Number(record?.attempts)!==Number(cloudRecords[id]?.attempts)||
+        Number(record?.updatedAt)!==Number(cloudRecords[id]?.updatedAt));
       window.retryAppBridge?.notify?.("クラウドの学習記録と同期しました。");
       cloudReady=true;
       setCloudUI("ok",shortName(user),"クラウド同期済み");
+      if(needsBackfill)saveSoon();
     }else{
       window.retryAppBridge?.notify?.("このアカウントのクラウド保存を開始しました。");
       cloudReady=true;
