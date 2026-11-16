@@ -1,11 +1,18 @@
 'use strict';
 const TrainerCore = (() => {
-  const blank = () => ({version:1,records:{},session:null,settings:{grade:'準2級',source:'all',count:10},updatedAt:0});
+  const blank = () => ({version:1,records:{},session:null,settings:{grade:'準2級',source:'all',count:10,reviewCount:10},updatedAt:0});
   const stat = (state,id) => state.records[id] || {attempts:0,mistakes:0,correct:0,pending:false,lastChoice:null,lastCorrect:null,updatedAt:0};
   function pool(questions,state,mode,filter=0) {
     return questions.filter(q => (!state.settings.grade || q.grade===state.settings.grade) && (state.settings.source!=='official' || q.answer_status==='official') && (mode==='new' ? stat(state,q.id).attempts===0 : (mode==='series' ? stat(state,q.id).mistakes>=Math.max(1,filter) : stat(state,q.id).pending)));
   }
   function shuffle(items,rng=Math.random) {const a=[...items]; for(let i=a.length-1;i>0;i--){let j=Math.floor(rng()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+  // Pick a bounded, randomly ordered subset of the existing review pool.
+  // 0 means all eligible questions; the same problem is never selected twice.
+  function reviewIds(questions,state,series,count=state.settings.reviewCount,rng=Math.random) {
+    const limit=[5,10,20,50,0].includes(count)?count:10;
+    const candidates=shuffle(pool(questions,state,series>0?'series':'review',series),rng);
+    return (limit?candidates.slice(0,limit):candidates).map(q=>q.id);
+  }
   function begin(state,ids,mode,now=Date.now()) {
     if(!ids.length) return false;
     state.session={id:String(now),mode,ids:[...new Set(ids)],index:0,answers:[],startedAt:now,screenAway:{count:0,totalMs:0}};return true;
@@ -28,7 +35,7 @@ const TrainerCore = (() => {
       if(!r || !integer(r.attempts)||!integer(r.mistakes)||!integer(r.correct)||r.attempts!==r.mistakes+r.correct||r.attempts<1||typeof r.pending!=='boolean'||typeof r.lastCorrect!=='boolean'||r.pending===r.lastCorrect||![0,1,2,3,4].includes(r.lastChoice)||!Number.isFinite(r.updatedAt)||r.mistakes<(r.pending?1:0)||r.correct<(r.lastCorrect?1:0))throw Error('記録データの形式が正しくありません。');
       out.records[id]={attempts:r.attempts,mistakes:r.mistakes,correct:r.correct,pending:r.pending,lastChoice:r.lastChoice,lastCorrect:r.lastCorrect,updatedAt:r.updatedAt};
     }
-    const cfg=input.settings||{};out.settings={grade:['4級','3級','準2級','2級','準1級',''].includes(cfg.grade)?cfg.grade:'準2級',source:cfg.source==='official'?'official':'all',count:[5,10,20,50,0].includes(cfg.count)?cfg.count:10};
+    const cfg=input.settings||{};out.settings={grade:['4級','3級','準2級','2級','準1級',''].includes(cfg.grade)?cfg.grade:'準2級',source:cfg.source==='official'?'official':'all',count:[5,10,20,50,0].includes(cfg.count)?cfg.count:10,reviewCount:[5,10,20,50,0].includes(cfg.reviewCount)?cfg.reviewCount:10};
     const s=input.session;
     if(s) {
       if(!Array.isArray(s.ids)||!s.ids.length||s.ids.length>questions.length||new Set(s.ids).size!==s.ids.length||s.ids.some(id=>!valid.has(id))||!integer(s.index)||s.index>s.ids.length||!Array.isArray(s.answers)||s.answers.length<s.index||s.answers.length>Math.min(s.index+1,s.ids.length)||!['new','review','series'].includes(s.mode))throw Error('途中の学習記録が正しくありません。');
@@ -39,6 +46,6 @@ const TrainerCore = (() => {
     if(out.session&&s.screenAway){const a=s.screenAway;out.session.screenAway={count:Number.isSafeInteger(a.count)&&a.count>=0?a.count:0,totalMs:Number.isFinite(a.totalMs)&&a.totalMs>=0?a.totalMs:0};}
     out.updatedAt=Number(input.updatedAt)||0;return out;
   }
-  return {blank,stat,pool,shuffle,begin,answer,advance,retryIds,validate};
+  return {blank,stat,pool,shuffle,reviewIds,begin,answer,advance,retryIds,validate};
 })();
 if(typeof module!=='undefined')module.exports=TrainerCore;
