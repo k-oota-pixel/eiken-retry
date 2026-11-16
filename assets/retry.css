@@ -28,3 +28,10 @@
   .signout-btn{font-size:0;width:27px;padding:3px}
   .signout-btn::after{content:"↪";font-size:13px}
 }
+
+/* Number of review questions is chosen before starting a session. */
+.review-start-controls{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:flex-end;gap:12px}
+.review-start-controls label{display:grid;gap:4px;font-size:12px;font-weight:700;color:var(--muted)}
+.review-start-controls select{min-width:130px;min-height:44px}
+.review-start-controls .btn{min-height:44px}
+@media(max-width:620px){.review-start-controls{justify-content:stretch;width:100%;margin-top:14px}.review-start-controls label{flex:1;min-width:110px}.review-start-controls select{width:100%}.review-start-controls .btn{flex:1;min-width:160px}}
